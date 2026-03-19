@@ -1,144 +1,147 @@
 import streamlit as st
 import pandas as pd
-from datetime import date, datetime
+import plotly.express as px
+from datetime import date
 import os
 
-# --- KONFIGURASI HALAMAN ---
-st.set_page_config(page_title="Tabulasi Data Lengkongjaya", layout="wide")
+# --- SETTING HALAMAN ---
+st.set_page_config(page_title="Tabulasi Lengkongjaya Pro + Scoring", layout="wide")
 
-# --- KONFIGURASI FILE ---
-DEFAULT_FILE = 'database_puskesmas.csv'
+DB_FILE = 'database_tabulasi_fix.csv'
 
-# --- FUNGSI LOGIKA OTOMATIS ---
-def hitung_usia_lengkap(tgl_lahir):
-    today = date.today()
-    thn = today.year - tgl_lahir.year
-    bln = today.month - tgl_lahir.month
-    hri = today.day - tgl_lahir.day
-    if hri < 0:
-        bln -= 1
-        hri += 30
-    if bln < 0:
-        thn -= 1
-        bln += 12
+# --- FUNGSI ANALISIS SKOR KESEHATAN ---
+def analisis_skor(bb, tb, gds, td):
+    skor_pesan = []
+    status_warna = "normal" # default
     
-    usia_str = f"{thn} Tahun {bln} Bulan {hri} Hari"
-    
-    # Kategori sesuai format Puskesmas
-    if thn <= 5: kelompok = "BALITA 0-5 TH"
-    elif thn <= 12: kelompok = "ANAK SEKOLAH"
-    elif thn <= 18: kelompok = "REMAJA"
-    elif thn <= 59: kelompok = "PRODUKTIF 18-59 TH"
-    else: kelompok = "LANSIA ≥60 TH"
-    
-    return usia_str, kelompok
+    # 1. Analisis IMT (BB/TB^2)
+    try:
+        tb_m = float(tb) / 100
+        imt = float(bb) / (tb_m * tb_m)
+        if imt < 18.5: skor_pesan.append("⚠️ Kekurangan Berat Badan")
+        elif 18.5 <= imt <= 25: skor_pesan.append("✅ Berat Badan Ideal")
+        else: 
+            skor_pesan.append("🚨 Obesitas/Kelebihan Berat Badan")
+            status_warna = "warning"
+    except: pass
 
-def load_data():
-    if os.path.exists(DEFAULT_FILE):
-        return pd.read_csv(DEFAULT_FILE, sep=';')
-    else:
-        # Template kolom sesuai file yang Anda upload
-        columns = [
-            "NO", "NAMA", "L", "P", "NO NIK", "NO BPJS", "Status BPJS", 
-            "TANGGAL LAHIR", "UMUR", "Kelompok Umur", "ALAMAT LENGKAP", 
-            "RT", "RW", "TD", "TB", "BB", "LP", "GDS"
-        ]
-        return pd.DataFrame(columns=columns)
+    # 2. Analisis Gula Darah (GDS)
+    try:
+        g = float(gds)
+        if g >= 200: 
+            skor_pesan.append("🚨 GDS Tinggi (Risiko Diabetes)")
+            status_warna = "danger"
+        elif g < 70: skor_pesan.append("⚠️ Hipoglikemia (Gula Rendah)")
+    except: pass
+
+    # 3. Analisis Tekanan Darah (TD)
+    try:
+        sistolik = int(td.split('/')[0])
+        if sistolik >= 140: 
+            skor_pesan.append("🚨 Hipertensi (Tekanan Darah Tinggi)")
+            status_warna = "danger"
+    except: pass
+
+    return " | ".join(skor_pesan) if skor_pesan else "Belum Ada Data Klinis", status_warna
+
+def clean_uploaded_data(df):
+    for i in range(min(10, len(df))):
+        row_values = df.iloc[i].astype(str).values
+        if any('NAMA' in val for val in row_values) or any('NIK' in val for val in row_values):
+            df.columns = df.iloc[i]
+            df = df.iloc[i+1:].reset_index(drop=True)
+            break
+    df = df.loc[:, df.columns.notna()]
+    df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
+    return df
 
 # --- INTERFACE ---
-st.title("🏥 Sistem Tabulasi Hasil Pemeriksaan CKG")
-st.subheader("UPT PUSKESMAS KARANGMULYA - DESA LENGKONGJAYA")
+st.title("🏥 Sistem Tabulasi & Skor Kesehatan CKG")
+st.caption("Versi Terpadu: Analisis IMT, GDS, & Hipertensi")
 
-# --- FITUR UPLOAD DATABASE ---
-with st.expander("📂 Upload Database Lama (File CSV)"):
-    uploaded_file = st.file_uploader("Pilih file CSV hasil tabulasi sebelumnya", type=["csv"])
-    if uploaded_file is not None:
-        try:
-            # Membaca file yang diupload (asumsi menggunakan ; atau ,)
-            df_upload = pd.read_csv(uploaded_file, sep=None, engine='python')
-            df_upload.to_csv(DEFAULT_FILE, index=False, sep=';')
-            st.success("✅ Database berhasil diperbarui dari file upload!")
-            st.rerun()
-        except Exception as e:
-            st.error(f"Gagal membaca file: {e}")
+with st.sidebar:
+    st.header("⚙️ Database")
+    uploaded_file = st.file_uploader("Upload Master CSV", type=["csv"])
+    if uploaded_file:
+        raw_df = pd.read_csv(uploaded_file, sep=None, engine='python')
+        df_cleaned = clean_uploaded_data(raw_df)
+        df_cleaned.to_csv(DB_FILE, index=False, sep=';')
+        st.success("Database Berhasil Disinkronkan!")
 
-df = load_data()
+if os.path.exists(DB_FILE):
+    df = pd.read_csv(DB_FILE, sep=';')
+    tab1, tab2, tab3 = st.tabs(["📝 Input & Skor", "🔍 Filter Data", "📈 Evaluasi & Grafik"])
 
-tab1, tab2 = st.tabs(["📝 Input Pemeriksaan Baru", "📊 Lihat & Kelola Data"])
+    # --- TAB 1: INPUT DENGAN TANGGAL FLEKSIBEL ---
+    with tab1:
+        with st.form("form_pemeriksaan"):
+            st.subheader("Form Pemeriksaan Pasien")
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                f_nama = st.text_input("Nama Lengkap").upper()
+                f_nik = st.text_input("NIK")
+                # Tanggal lahir tanpa batasan (dari tahun 1900 sampai hari ini)
+                f_tgl = st.date_input("Tanggal Lahir", 
+                                     min_value=date(1900, 1, 1), 
+                                     max_value=date.today(),
+                                     value=date(1990, 1, 1))
+            with c2:
+                f_jk = st.selectbox("Jenis Kelamin", ["L", "P"])
+                f_bb = st.number_input("Berat Badan (kg)", min_value=0.0, step=0.1)
+                f_tb = st.number_input("Tinggi Badan (cm)", min_value=0.0, step=0.1)
+            with c3:
+                f_td = st.text_input("Tensi (Contoh: 120/80)")
+                f_gds = st.number_input("Gula Darah (mg/dL)", min_value=0)
+                f_alamat = st.text_input("Kampung/Alamat")
 
-# --- TAB 1: INPUT DATA ---
-with tab1:
-    with st.form("form_input", clear_on_submit=True):
-        st.markdown("### Identitas & Hasil Pemeriksaan")
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            nama = st.text_input("Nama Lengkap").upper()
-            nik = st.text_input("No NIK")
-            bpjs = st.text_input("No BPJS")
-        with c2:
-            tgl_lhr = st.date_input("Tanggal Lahir", value=date(2000, 1, 1))
-            jk = st.radio("Jenis Kelamin", ["Laki-laki", "Perempuan"])
-            status_bpjs = st.selectbox("Status BPJS", ["AKTIF", "TIDAK AKTIF"])
-        with c3:
-            alamat = st.text_input("Kampung/Alamat")
-            rt = st.text_input("RT")
-            rw = st.text_input("RW")
+            if st.form_submit_button("Analisis & Simpan"):
+                skor_hasil, warna = analisis_skor(f_bb, f_tb, f_gds, f_td)
+                umur = date.today().year - f_tgl.year
+                
+                new_data = pd.DataFrame([{
+                    "NO": len(df)+1, "NAMA": f_nama, "NO NIK": f"'{f_nik}",
+                    "TANGGAL LAHIR": f_tgl.strftime("%d/%m/%Y"),
+                    "L": "TRUE" if f_jk == "L" else "FALSE",
+                    "P": "TRUE" if f_jk == "P" else "FALSE",
+                    "BB": f_bb, "TB": f_tb, "TD": f_td, "GDS": f_gds,
+                    "STATUS KESEHATAN": skor_hasil, "UMUR": f"{umur} Tahun",
+                    "ALAMAT LENGKAP": f_alamat
+                }])
+                
+                df = pd.concat([df, new_data], ignore_index=True)
+                df.to_csv(DB_FILE, index=False, sep=';')
+                st.success(f"Hasil Analisis: {skor_hasil}")
+                st.rerun()
+
+    # --- TAB 2: FILTER MULTI-HEADER ---
+    with tab2:
+        st.subheader("Pencarian & Filter")
+        all_cols = df.columns.tolist()
+        selected_cols = st.multiselect("Pilih Kolom Tampil", all_cols, default=["NAMA", "NO NIK", "UMUR", "STATUS KESEHATAN"])
+        
+        # Filter Dinamis
+        f_df = df
+        c_f1, c_f2 = st.columns(2)
+        with c_f1:
+            search_nama = st.text_input("Cari Nama")
+            if search_nama: f_df = f_df[f_df['NAMA'].str.contains(search_nama.upper(), na=False)]
+        with c_f2:
+            if "STATUS KESEHATAN" in df.columns:
+                unique_status = df["STATUS KESEHATAN"].unique().tolist()
+                sel_status = st.multiselect("Filter Status Kesehatan", unique_status)
+                if sel_status: f_df = f_df[f_df["STATUS KESEHATAN"].isin(sel_status)]
+
+        st.dataframe(f_df[selected_cols], use_container_width=True)
+
+    # --- TAB 3: EVALUASI ---
+    with tab3:
+        st.subheader("Statistik Kesehatan Warga")
+        if "STATUS KESEHATAN" in df.columns:
+            # Hitung risiko
+            risiko_count = df[df['STATUS KESEHATAN'].str.contains("🚨", na=False)].shape[0]
+            st.metric("Total Warga Berisiko Tinggi", risiko_count)
             
-        st.markdown("### Hasil Klinis")
-        k1, k2, k3, k4 = st.columns(4)
-        with k1: td = st.text_input("Tensi (TD)")
-        with k2: tb = st.text_input("Tinggi Badan (TB)")
-        with k3: bb = st.text_input("Berat Badan (BB)")
-        with k4: gds = st.text_input("Gula Darah (GDS)")
-        
-        submit = st.form_submit_button("Simpan ke Tabulasi")
-
-    if submit:
-        usia_txt, kelompok_txt = hitung_usia_lengkap(tgl_lhr)
-        l_val = "TRUE" if jk == "Laki-laki" else "FALSE"
-        p_val = "TRUE" if jk == "Perempuan" else "FALSE"
-        
-        new_row = {
-            "NO": len(df) + 1,
-            "NAMA": nama,
-            "L": l_val, "P": p_val,
-            "NO NIK": f"'{nik}",
-            "NO BPJS": f"'{bpjs}",
-            "Status BPJS": status_bpjs,
-            "TANGGAL LAHIR": tgl_lhr.strftime("%d %B %Y"),
-            "UMUR": usia_txt,
-            "Kelompok Umur": kelompok_txt,
-            "ALAMAT LENGKAP": alamat,
-            "RT": rt, "RW": rw,
-            "TD": td, "TB": tb, "BB": bb, "GDS": gds
-        }
-        
-        df_new = pd.DataFrame([new_row])
-        df_new.to_csv(DEFAULT_FILE, mode='a', index=False, header=not os.path.exists(DEFAULT_FILE), sep=';')
-        st.success(f"Data {nama} Berhasil Disimpan!")
-        st.rerun()
-
-# --- TAB 2: KELOLA DATA ---
-with tab2:
-    st.subheader("Data Tabulasi Terdaftar")
-    
-    # Filter Pencarian
-    search = st.text_input("🔍 Cari berdasarkan Nama atau NIK")
-    if search:
-        df_view = df[df['NAMA'].str.contains(search.upper(), na=False) | df['NO NIK'].str.contains(search, na=False)]
-    else:
-        df_view = df
-        
-    st.dataframe(df_view, use_container_width=True)
-    
-    # Tombol Hapus Data Terakhir
-    if st.button("🔴 Hapus Baris Terakhir"):
-        if not df.empty:
-            df = df.drop(df.index[-1])
-            df.to_csv(DEFAULT_FILE, index=False, sep=';')
-            st.warning("Baris terakhir telah dihapus.")
-            st.rerun()
-
-    # Download Data
-    csv = df.to_csv(index=False, sep=';').encode('utf-8')
-    st.download_button("📥 Download Hasil Tabulasi (Excel Ready)", data=csv, file_name="HASIL_TABULASI_FIX.csv", mime="text/csv")
+            fig = px.pie(df, names="STATUS KESEHATAN", title="Proporsi Status Kesehatan")
+            st.plotly_chart(fig)
+else:
+    st.info("Sidebar: Silakan upload file CSV master untuk memulai.")
